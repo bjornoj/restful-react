@@ -17,6 +17,7 @@ import {
   RequestBodyObject,
   ResponseObject,
   SchemaObject,
+  ResponsesObject,
 } from "openapi3-ts";
 
 import swagger2openapi from "swagger2openapi";
@@ -270,6 +271,156 @@ const importSpecs = (data: string, extension: "yaml" | "json"): Promise<OpenAPIO
  *  reactPropsValueToObjectValue(`{ getConfig("myVar") }`) // `getConfig("myVar")`
  */
 export const reactPropsValueToObjectValue = (value: string) => value.replace(/^{(.*)}$/, "$1");
+
+interface QueryParameter {
+  description: string;
+  in: string;
+  name: string;
+  required: boolean;
+  schema: { items?: { enum: Array<string>; type: string }; type: string; default?: string; enum?: [string] };
+}
+
+const isQueryParameter = (maybeParameter: any): maybeParameter is QueryParameter => {
+  return !(
+    maybeParameter.description &&
+    maybeParameter.in &&
+    maybeParameter.name &&
+    maybeParameter.required &&
+    maybeParameter.schema &&
+    maybeParameter.schema.type
+  );
+};
+
+const isBodyObject = (
+  maybeBodyObject: RequestBodyObject | ReferenceObject | undefined,
+): maybeBodyObject is RequestBodyObject => {
+  return !maybeBodyObject?.$ref;
+};
+
+/**
+ * Generate a typescript api from openapi operation specs
+ *
+ * @param verb get, put, post, delete or patch
+ * @param responses the possible responses of the request. Only 200 response types are used.
+ * @param functionName the name of the function
+ * @param body should be defined if verb is post or put
+ * @param queryParams should be defined when verb is get or delete
+ */
+export const generateNodeAPI = (
+  verb: string,
+  responses: ResponsesObject,
+  route: string,
+  functionName?: string,
+  body?: RequestBodyObject | ReferenceObject,
+  queryParams?: (ParameterObject | ReferenceObject)[],
+): string => {
+  let returnType = "{}";
+  let parameters = "";
+  let apiCall = "";
+  let url = "";
+
+  if (
+    responses["200"] &&
+    responses["200"].content &&
+    responses["200"].content["application/json"] &&
+    responses["200"].content["application/json"].schema &&
+    responses["200"].content["application/json"].schema.$ref
+  ) {
+    const schema: string = responses["200"].content["application/json"].schema.$ref;
+    const splitSchema = schema.split("/");
+    returnType = splitSchema[splitSchema.length - 1];
+  }
+
+  if (verb === "get" || verb === "delete") {
+    // query params should be defined
+    url = `buildURL('${route}'`;
+    queryParams?.forEach((param, i) => {
+      if (i === 0) {
+        url += `, `;
+      } else {
+        parameters += ", ";
+        url += `, `;
+      }
+      if (isQueryParameter(param)) {
+        // first we fix the api call
+        url += `["${param.name}", ${param.name}]`;
+
+        parameters += param.name;
+        if (!param.required && !param.schema.default) {
+          // add question mark
+          parameters += `?`;
+        }
+        const type = param.schema.type === "integer" ? "number" : param.schema.type;
+        if (param.schema.default) {
+          if (param.schema.enum) {
+            // the type is different
+            param.schema.enum?.forEach((param, i) => {
+              if (i === 0) {
+                parameters += ": ";
+              } else {
+                parameters += " | ";
+              }
+              parameters += `"${param}"`;
+            });
+          } else {
+            parameters += `: ${type}`;
+          }
+          parameters += ` = "${param.schema.default}"`;
+        } else if (param.schema.items && param.schema.items.enum) {
+          // loop over each item in the enum, and add it as a type
+          parameters += ": (";
+          param.schema.items.enum.forEach((item, i) => {
+            if (i !== 0) {
+              // start with comma if not first index
+              parameters += " | ";
+            }
+
+            parameters += `"${item}"`;
+          });
+          parameters += ")[]";
+        } else {
+          parameters += `: ${type}`;
+        }
+      }
+    });
+    apiCall = `${verb}(${url})`;
+  } else {
+    // the parameters are just embedded as body
+    let schema = "";
+    if (isBodyObject(body) && body.content && body.content["application/json"]) {
+      schema = body.content["application/json"]?.schema?.$ref ?? "";
+    } else {
+      // if it has a different shape than ref it's required
+      schema = body?.$ref ?? "";
+    }
+
+    let requestType = "";
+    if (schema !== "") {
+      const splitSchema = schema.split("/");
+      requestType = splitSchema[splitSchema.length - 1];
+    }
+
+    if (requestType === "" || requestType.includes("_")) {
+      // It is an empty request, and we can just have no parameters
+      parameters = "";
+      apiCall = `${verb}("${route}"`;
+    } else {
+      parameters = `req: ${requestType}`;
+      apiCall = `${verb}("${route}", req`;
+    }
+  }
+
+  return `
+export const ${functionName} = async (${parameters}): Promise<${returnType}> => {
+  try {
+    const response = await api.${apiCall});
+    return response.data as ${returnType};
+  } catch (error) {
+    throw Error(error);
+  }
+};
+`;
+};
 
 /**
  * Generate a restful-react component from openapi operation specs
@@ -545,6 +696,21 @@ ${description}export const use${componentName} = (${
     });
 
 `;
+  } else {
+    // they don't want a react API, so we assume they want a node API
+    try {
+      output += generateNodeAPI(
+        verb,
+        operation.responses,
+        route,
+        operation.operationId,
+        operation.requestBody,
+        operation.parameters,
+      );
+    } catch (error) {
+      console.log(operation.responses);
+      console.log(operation.responses["200"]);
+    }
   }
 
   // Custom version
@@ -816,9 +982,36 @@ const importOpenApi = async ({
 
   let output = "";
 
+  if (skipReact) {
+    output += `import { AxiosInstance } from "axios";
+
+let api: AxiosInstance;
+
+export const setCredentials = (axiosAPI: AxiosInstance, apiURL: string, apiKey?: string, timeout?: number): void => {
+  api = axiosAPI;
+
+  api.defaults.baseURL = apiURL;
+
+  if (timeout) {
+    api.defaults.timeout = timeout;
+  }
+
+  if (apiKey) {
+    api.defaults.headers = { Authorization: apiKey };
+  }
+};
+`;
+
+    // buildURL is a function used to generate node request URLs
+    output +=
+      // eslint-disable-next-line no-template-curly-in-string
+      "\nconst buildURL = (route: string, ...args: [string, any][]): string => { let url = route;let params = ''; args.forEach(arg => { const name = arg[0]; const value = arg[1];if (value) {if (params === '') { params += `?${name}=${value}`; } else { params += `&${name}=${value}`; } } });return `${url}${params}`;}\n";
+  }
+
   output += generateSchemasDefinition(specs.components && specs.components.schemas);
   output += generateRequestBodiesDefinition(specs.components && specs.components.requestBodies);
   output += generateResponsesDefinition(specs.components && specs.components.responses);
+
   Object.entries(specs.paths).forEach(([route, verbs]: [string, PathItemObject]) => {
     Object.entries(verbs).forEach(([verb, operation]: [string, OperationObject]) => {
       if (["get", "post", "patch", "put", "delete"].includes(verb)) {

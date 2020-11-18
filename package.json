@@ -42,6 +42,7 @@
     "start": "tsdx watch",
     "test": "tsdx test",
     "lint": "tsdx lint",
+    "prettier": "prettier --check *",
     "build": "run-p build:*",
     "build:project": "tsdx build",
     "build:bin": "tsc && rollup -c rollup.config.js",
@@ -51,7 +52,8 @@
     "example:github": "node dist/bin/restful-react.js import --github OAI:OpenAPI-Specification:master:examples/v3.0/petstore.yaml --output examples/petstoreFromGithubSpec.tsx",
     "example:url": "node dist/bin/restful-react.js import --url https://petstore.swagger.io/v2/swagger.json --output examples/petstoreFromUrlSpec.tsx",
     "example:file": "node dist/bin/restful-react.js import --file examples/petstore.yaml --output examples/petstoreFromFileSpec.tsx",
-    "example:advanced": "node dist/bin/restful-react.js import --config examples/restful-react.config.js"
+    "example:advanced": "node dist/bin/restful-react.js import --config examples/restful-react.config.js",
+    "example:skip-react": "node dist/bin/restful-react.js import --file teslacoil.stripped-openapi.json --output teslacoil.ts --skip-react && yarn prettier --write"
   },
   "dependencies": {
     "case": "^1.6.2",
